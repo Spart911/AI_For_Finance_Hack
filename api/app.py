@@ -5,7 +5,7 @@ from database import db
 from Controllers.UserController import *
 from Controllers.MessageController import *
 from Controllers.AudioController import *
-from Controllers.RoleController import *
+from Controllers.ChatController import *
 from Controllers.DepartmentController import *
 
 app = Flask(__name__)
@@ -43,8 +43,8 @@ app.config['SWAGGER'] = {
             'description': 'Операции с пользователями'
         },
         {
-            'name': 'Roles',
-            'description': 'Операции с ролями'
+            'name': 'Chats',
+            'description': 'Операции с чатами'
         },
         {
             'name': 'Departments',
@@ -78,12 +78,26 @@ app.route('/api/users/<int:item_id>', methods=['GET'])(get_user)
 app.route('/api/users/', methods=['POST'])(add_user)
 app.route('/api/users/<int:item_id>', methods=['PUT'])(update_user)
 
-# Роуты ролей
-app.route('/api/roles/', methods=['GET'])(get_roles)
-app.route('/api/roles/<int:role_id>', methods=['GET'])(get_role)
-app.route('/api/roles/', methods=['POST'])(add_role)
-app.route('/api/roles/<int:role_id>', methods=['PUT'])(update_role)
-app.route('/api/roles/<int:role_id>', methods=['DELETE'])(delete_role)
+# ----------------- Manager routes -----------------
+app.route('/api/managers/', methods=['GET'])(get_managers)
+app.route('/api/managers/<int:item_id>', methods=['GET'])(get_manager)
+app.route('/api/managers/', methods=['POST'])(add_manager)
+app.route('/api/managers/<int:item_id>', methods=['PUT'])(update_manager)
+app.route('/api/managers/<int:item_id>', methods=['DELETE'])(delete_manager)
+
+# ----------------- Employee routes -----------------
+app.route('/api/employees/', methods=['GET'])(get_employees)
+app.route('/api/employees/<int:item_id>', methods=['GET'])(get_employee)
+app.route('/api/employees/', methods=['POST'])(add_employee)
+app.route('/api/employees/<int:item_id>', methods=['PUT'])(update_employee)
+app.route('/api/employees/<int:item_id>', methods=['DELETE'])(delete_employee)
+
+# Роуты чатов
+app.route('/api/chats/', methods=['GET'])(get_chats)
+app.route('/api/chats/<int:chat_id>', methods=['GET'])(get_chat)
+app.route('/api/chats/', methods=['POST'])(add_chat)
+app.route('/api/chats/<int:chat_id>', methods=['PUT'])(update_chat)
+app.route('/api/chats/<int:chat_id>', methods=['DELETE'])(delete_chat)
 
 # Роуты отделов
 app.route('/api/departments/', methods=['GET'])(get_departments)

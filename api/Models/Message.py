@@ -7,14 +7,16 @@ class Message(db.Model):
     type = db.Column(db.Boolean) # 0 - text, 1 - audio
     code = db.Column(db.String(4), unique=False)
     sender = db.Column(db.Boolean) # 0 - user, 1 - server
+    chat_id = db.Column(db.Integer, db.ForeignKey('chat.id'), nullable=False)
 
 
-    def __init__(self, message, time, type, code, sender):  
+    def __init__(self, message, time, type, code, sender, chat_id):  
         self.message = message 
         self.time = time
         self.type = type
         self.code = code 
         self.sender = sender
+        self.chat_id = chat_id
 
     def __repr__(self):
         return '<Message %r>' % self.message

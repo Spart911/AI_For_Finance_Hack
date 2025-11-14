@@ -1,5 +1,7 @@
 from flask import jsonify, request
 from Models.Message import Message, db
+from Models.User import User
+from Models.Chat import Chat
 from sqlalchemy import desc
 from datetime import datetime
 import speech_recognition as sr
@@ -8,9 +10,10 @@ import os
 import requests
 from pathlib import Path
 import re
+from openai import OpenAI
 from flasgger import swag_from
 
-API_URL = "https://api.polza.ai/api/v1/chat/completions"
+API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
 def _load_env_from_file():
@@ -52,11 +55,16 @@ def _load_env_from_file():
 _load_env_from_file()
 
 
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.getenv("OPENROUTER_API_KEY")
+)
+
 def _auth_header() -> str:
-    token = os.getenv("POLZA_API_KEY", "").strip()
+    token = os.getenv("OPENROUTER_API_KEY", "").strip()
     if not token:
-        raise RuntimeError("POLZA_API_KEY не задан (укажите в api/.env или test/.env)")
-    return token if token.lower().startswith("bearer ") else f"Bearer {token}"
+        raise RuntimeError("OPENROUTER_API_KEY not set in environment")
+    return f"Bearer {token}"
 
 
 def audio_to_text(audio):
@@ -74,36 +82,34 @@ def audio_to_text(audio):
     return text
 
 
-
-def request_gpt_simple(text):
-    # Установка политики цикла событий для предотвращения предупреждения (если где-то есть asyncio)
+def request_gpt_openrouter(text, previous_messages=None):
+    """
+    Sends a request to OpenRouter GPT-5.1 with reasoning support.
+    previous_messages: list of dicts [{'role': 'user'/'assistant', 'content': str, 'reasoning_details': {...}}]
+    """
     asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
 
-    payload = {
-        "model": "qwen/qwen-turbo",
-        "messages": [
-            {"role": "system", "content": "Ты голосовой помощник банка. Отвечай кратко и по делу."},
-            {"role": "user", "content": f"Обращение: {text}"},
-        ],
-        "temperature": 0.7,
-        "max_tokens": 512,
-    }
+    # Build messages list
+    messages = [
+        {"role": "system", "content": "Ты голосовой помощник банка. Отвечай кратко и по делу."},
+        {"role": "user", "content": text}
+    ]
 
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Authorization": _auth_header(),
-    }
+    if previous_messages:
+        # Append previous conversation preserving reasoning details
+        for msg in previous_messages:
+            messages.append(msg)
 
-    resp = requests.post(API_URL, json=payload, headers=headers, timeout=30)
     try:
-        resp.raise_for_status()
-    except requests.HTTPError as e:
-        # Пробрасываем текст ответа для диагностики в логи/клиент
-        raise requests.HTTPError(f"{e} | Body: {resp.text}") from e
+        response = client.chat.completions.create(
+            model="openai/gpt-5.1",
+            messages=messages,
+            extra_body={"reasoning": {"enabled": True}}
+        )
+        return response.choices[0].message
+    except Exception as e:
+        return {"content": f"Ошибка запроса к AI: {e}", "reasoning_details": {}}
 
-    data = resp.json()
-    return data.get("choices", [{}])[0].get("message", {}).get("content", "")
 
 """
 method=GET
@@ -235,29 +241,7 @@ def get_message(item_id):
     else:
         return jsonify({'status': False, 'message': 'Message not found'}), 404
 
-"""
-method=POST
 
-POST body for sending message: user_id, type, code="000", message
-type: 0 -> text message / 1 -> audio message
-returns {
-    status: true/false,
-    message: Server response / "none" (if ai is dumb)
-    ai_msg_time = time, when server responded
-    user_msg_time = time, when server registered user request
-    redir = ""
-    message_id = user inserted message id
-}
-
-POST body for target action: code
-returns {
-    message: server ask (you should pop it into chat from server)
-    redir = "api/*insert api route*" / false
-    values = {code: user_option1, code: user_option2} / code
-}
-
-example logic - if (redir) route(localhost/redir)
-"""    
 @swag_from({
     'tags': ['Messages'],
     'consumes': ['application/x-www-form-urlencoded', 'multipart/form-data'],
@@ -268,6 +252,13 @@ example logic - if (redir) route(localhost/redir)
             'type': 'integer',
             'required': True,
             'description': 'ID пользователя'
+        },
+        {
+            'name': 'chat_id',
+            'in': 'formData',
+            'type': 'integer',
+            'required': False,
+            'description': 'ID чата. Если не указан, будет создан новый чат'
         },
         {
             'name': 'type',
@@ -292,25 +283,19 @@ example logic - if (redir) route(localhost/redir)
         }
     ],
     'responses': {
-        200: {
-            'description': 'Сообщение обработано',
+        201: {
+            'description': 'Сообщение добавлено и ответ AI получен',
             'schema': {
                 'type': 'object',
                 'properties': {
-                    'message': {'type': 'string'},
-                    'redir': {'type': 'string'},
-                    'values': {
-                        'oneOf': [
-                            {'type': 'string'},
-                            {
-                                'type': 'object',
-                                'additionalProperties': {
-                                    'type': 'string'
-                                }
-                            }
-                        ]
-                    },
-                    'title': {'type': 'string'}
+                    'status': {'type': 'boolean'},
+                    'message': {'type': 'string', 'description': 'Ответ AI'},
+                    'user_msg_time': {'type': 'string', 'description': 'Время отправки сообщения пользователем'},
+                    'ai_msg_time': {'type': 'string', 'description': 'Время ответа AI'},
+                    'redir': {'type': 'string', 'description': 'URL для перенаправления (если есть)'},
+                    'message_id': {'type': 'integer', 'description': 'ID сохраненного сообщения пользователя'},
+                    'chat_id': {'type': 'integer', 'description': 'ID чата'},
+                    'reasoning_details': {'type': 'object', 'description': 'Детали рассуждений AI (если включены)'}
                 }
             }
         },
@@ -323,228 +308,91 @@ example logic - if (redir) route(localhost/redir)
                     'message': {'type': 'string'}
                 }
             }
-        },
-        201: {
-            'description': 'Сообщение добавлено',
-            'schema': {
-                'type': 'object',
-                'properties': {
-                    'status': {'type': 'boolean'},
-                    'message': {'type': 'string'},
-                    'user_msg_time': {'type': 'string'},
-                    'ai_msg_time': {'type': 'string'},
-                    'redir': {'type': 'string'},
-                    'message_id': {'type': 'integer'}
-                }
-            }
         }
     }
 })
 def add_message():
     user_id = request.form.get('user_id', -1)
-    time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    type = request.form.get('type', 2)
+    chat_id = request.form.get('chat_id')
+    time_now = datetime.now()
+    msg_type = request.form.get('type', 2)
     code = request.form.get('code')
     sender = False
     redir = ""
-    if code != "000":
-        target_theme_id = list(code)[0]
-        theme_index = list(code)[1]
-        mas_index = list(code)[2]
-        match target_theme_id:
-            case "1":
-                match theme_index:
-                    case "1":   # Потребительский
-                        match mas_index:
-                            case "0":
-                                response = "Какая у вас цель кредитования?"
-                                return jsonify({'message': response, 'redir': redir if redir != "" else False, 'values': "111"}), 200
-                            case "1":
-                                response = "На какую сумму вы хотите взять кредит?"
-                                return jsonify({'message': response, 'redir': redir if redir != "" else False, 'values': "112"}), 200
-                            case "2":
-                                response = "На какой срок вы планируете взять кредит?"
-                                return jsonify({'message': response, 'redir': redir if redir != "" else False, 'values': "115"}), 200
-                    case "2":    # Автокредит
-                        match mas_index:
-                            case "0":
-                                response = "Какая стоимость автомобиля?"
-                                return jsonify({'message': response, 'redir': redir if redir != "" else False, 'values': "121"}), 200
-                            case "1":
-                                response = "Каков первоначальный взнос?"
-                                return jsonify({'message': response, 'redir': redir if redir != "" else False, 'values': "122"}), 200
-                            case "2":
-                                response = "На какой срок вы планируете взять кредит?"
-                                return jsonify({'message': response, 'redir': redir if redir != "" else False, 'values': "125"}), 200
 
-                    case "3":   # Ипотека
-                        match mas_index:
-                            case "0":
-                                response = "Какая у вас цель кредитования?"
-                                return jsonify({'message': response, 'redir': redir if redir != "" else False, 'values': "131"}), 200
-                            case "1":
-                                response = "На какую сумму вы хотите взять кредит?"
-                                return jsonify({'message': response, 'redir': redir if redir != "" else False, 'values': "132"}), 200
-                            case "2":
-                                response = "Каков первоначальный взнос?"
-                                return jsonify({'message': response, 'redir': redir if redir != "" else False, 'values': "133"}), 200
-                            case "3":
-                                response = "На какой срок вы планируете взять кредит?"
-                                return jsonify({'message': response, 'redir': redir if redir != "" else False, 'values': "135"}), 200
-                match mas_index:
-                    case "5":
-                        response = "Укажите Наименование"
-                        return jsonify({'message': response, 'redir': redir if redir != "" else False, 'values': "1" + theme_index + "6"}), 200
-                    case "6":
-                        response = "Укажите ИНН"
-                        return jsonify({'message': response, 'redir': redir if redir != "" else False, 'values': "1" + theme_index + "7"}), 200
-                    case "7":
-                        response = "Укажите Фактический адрес компании по месту вашей работы"
-                        return jsonify({'message': response, 'redir': redir if redir != "" else False, 'values': "1" + theme_index + "8"}), 200
-                    case "8":
-                        response = "Укажите Среднемесячный доход после уплаты налогов за последние 12 месяцев"
-                        return jsonify({'message': response, 'redir': redir if redir != "" else False, 'values': "1" + theme_index + "9"}), 200
-                    case "9":    
-                        if theme_index == '1':
-                            redir = "api/consumercredits/"
-                            title = "Потребительский кредит"
-                        elif theme_index == '2':
-                            redir = "api/autocredits/"
-                            title = "Автокредит"
-                        elif theme_index == '3':
-                            redir = "api/mortgages/"
-                            title = "Ипотека"
-                        return jsonify({'redir': redir if redir != "" else False, 'title': "История операций"}), 200
+    if int(user_id) < 1 or not msg_type or not code:
+        return jsonify({'status': False, 'message': 'Missing required fields'}), 400
 
-            case "2":
-                match theme_index:
-                    case "1":
-                        response = "Какая сумма вклада?"
-                        return jsonify({'message': response, 'redir': redir if redir != "" else False, 'values': "220"}), 200
-                    case "2":
-                        response = "Какой срок размещения?"
-                        return jsonify({'message': response, 'redir': redir if redir != "" else False, 'values': "230"}), 200
-                    case "3":
-                        redir = "api/contributions"
-                        return jsonify({'redir': redir if redir != "" else False, 'title': "Открытие вклада"}), 200
-            case "3":
-                match theme_index:
-                    case "1":
-                        response = "На какую валюту вы хотите обменять?"
-                        return jsonify({'message': response, 'redir': redir if redir != "" else False, 'values': "320"}), 200
-                    case "2":
-                        response = "Сколько вы хотите обменять?"
-                        return jsonify({'message': response, 'redir': redir if redir != "" else False, 'values': "330"}), 200
-                    case "3":
-                        redir = "api/currencyexchanges"
-                        return jsonify({'redir': redir if redir != "" else False, 'title': "Обмен валюты"}), 200
+    # Ensure user exists
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'status': False, 'message': 'User not found'}), 404
 
-            case "4":
-                match theme_index:
-                    case "1":
-                        response = "Укажите номер счета на который вы хотите перевести деньги?"
-                        return jsonify({'message': response, 'redir': redir if redir != "" else False, 'values': "320"}), 200
-                    case "2":
-                        response = "Укажите сумму перевода?"
-                        return jsonify({'message': response, 'redir': redir if redir != "" else False, 'values': "330"}), 200
-                    case "3":
-                        redir = "api/transactions"
-                        return jsonify({'redir': redir if redir != "" else False, 'title': "Перевод"}), 200
-            case "6":
-                match theme_index:
-                    case "1":
-                        redir = "periodSpend"
-                        return jsonify({'redir': redir if redir != "" else False, 'title': "Расход за период"}), 200
-    else:
-        if int(user_id) < 1 or not type or not code:
-            return jsonify({'status': False, 'message': 'Missing required fields'}), 400
-        
-        if type == '1':
-            # Проверяем, есть ли файл в запросе
-            if 'message' not in request.files:
-                return jsonify({'status': False, 'message': 'No file part'}), 400
-
-            # Получаем файл из запроса
-            message_file = request.files['message']
-            message = audio_to_text(message_file)
-        elif type == '0':
-            message = request.form.get('message')
-        
-        # Ответ без тематики
-        response = request_gpt_simple(message)
-
-        new_message = Message(message=message, time=time, type=bool(int(type)), code=code, sender=sender)
-        new_response = Message(message=response, time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'), type=False, code="000", sender=True)
-        db.session.add(new_message)
-        db.session.add(new_response)
+    # Handle chat creation if chat_id not provided
+    if not chat_id:
+        new_chat = Chat(name=f"Chat with User {user_id}", user_id=user_id)
+        db.session.add(new_chat)
         db.session.commit()
+        chat_id = new_chat.id
+    else:
+        chat_id = int(chat_id)
+        chat = Chat.query.get(chat_id)
+        if not chat:
+            return jsonify({'status': False, 'message': 'Chat not found'}), 404
 
-        inserted_message_id = new_message.id
+    # Handle audio messages
+    if msg_type == '1':
+        if 'message' not in request.files:
+            return jsonify({'status': False, 'message': 'No file part'}), 400
+        message_file = request.files['message']
+        message_text = audio_to_text(message_file)
+    else:
+        message_text = request.form.get('message')
+        if not message_text:
+            return jsonify({'status': False, 'message': 'Message text is required'}), 400
 
-        return jsonify({'status': True, 'message': response, 'user_msg_time': new_message.time, 'ai_msg_time': new_response.time, 'redir': redir, 'message_id': inserted_message_id}), 201
+    # Send to GPT-5.1 via OpenRouter
+    assistant_msg_obj = request_gpt_openrouter(message_text)
+    assistant_msg = (
+        assistant_msg_obj.get("content")
+        if isinstance(assistant_msg_obj, dict)
+        else assistant_msg_obj.content
+    )
+    reasoning_details = (
+        assistant_msg_obj.get("reasoning_details", {})
+        if isinstance(assistant_msg_obj, dict)
+        else getattr(assistant_msg_obj, "reasoning_details", {})
+    )
 
-        # Находим последнюю тему для данного пользователя
-        last_theme = Theme.query.filter_by(user_id=user_id).order_by(desc(Theme.id)).first()
+    # Store messages in DB
+    user_message = Message(
+        message=message_text,
+        time=time_now,
+        type=bool(int(msg_type)),
+        code=code,
+        sender=sender,
+        chat_id=chat_id
+    )
+    ai_message = Message(
+        message=assistant_msg,
+        time=datetime.now(),
+        type=False,
+        code="000",
+        sender=True,
+        chat_id=chat_id
+    )
 
-        if last_theme is None:
-            last_theme = "chupakabra"
-            last_theme_id = 0
-        else: 
-            last_theme_id = last_theme.id
-            last_theme = last_theme.theme_name
+    db.session.add(user_message)
+    db.session.add(ai_message)
+    db.session.commit()
 
-        response, theme = request_gpt(message, ("Открытие кредита", "Открытие вклада", "Обмен валюты", "Перевод", "История операций", "Расход за период"), last_theme, last_theme_id)
-        if (response == "none"):
-            response, theme = request_gpt(message, ("Открытие кредита", "Открытие вклада", "Обмен валюты", "Перевод", "История операций", "Расход за период"), last_theme, last_theme_id)
-
-        spec_theme = ("открытие кредита", "открытие вклада", "обмен валюты", "перевод", "история операций", "расход за период")
-        if theme.strip() in spec_theme:
-            if theme.strip() == spec_theme[0]:
-                code = "100"
-                response = "Какой кредит вы хотите открыть?" # НА ФРОНТ ТЕКСТОМ НА ВЫВОД В ДИАЛОГ
-                values = {110: "Потребительский", 120: "Автокредит", 130: "Ипотека"}
-                return jsonify({'message': response, 'redir': redir if redir != "" else False, 'values': values}), 200
-            elif theme.strip() == spec_theme[1]:
-                code = "200"
-                response = "Условия договора:/n Срок договора - 36 месяцев/n Расторжение без потери % ежеквартально/n Выплата % ежеквартально/n Без пополнения/n С капитализацией/n Без автопролонгации/n Хотите открыть вклад?" # НА ФРОНТ ТЕКСТОМ НА ВЫВОД В ДИАЛОГ
-                return jsonify({'message': response, 'redir': redir if redir != "" else False, 'values': "210"}), 200
-            elif theme.strip() == spec_theme[2]:
-                code = "300"
-                response = "Какую валюту вы хотите обменять?"  # НА ФРОНТ ТЕКСТОМ НА ВЫВОД В ДИАЛОГ
-                return jsonify({'message': response, 'redir': redir if redir != "" else False, 'values': "310"}), 200
-            elif theme.strip() == spec_theme[3]:
-                code = "400"
-                response = "С какого счета вы хотите перевести деньги?"  # НА ФРОНТ ТЕКСТОМ НА ВЫВОД В ДИАЛОГ
-                return jsonify({'message': response, 'redir': redir if redir != "" else False, 'values': "410"}), 200
-            elif theme.strip() == spec_theme[4]:
-                code = "500"
-                redir = "/api/historyOperations"
-                return jsonify({'redir': redir if redir != "" else False, 'title': "История операций"}), 200
-            elif theme.strip() == spec_theme[5]:
-                code = "600"
-                response = "С какого по какое число вы хотите узнать расход средств?" # ПРИЗЫВ К ДЕЙСТВИИ НА ПЕРЕХОД К СТРАНИЦЕ РАСХОД ЗА ПЕРИОД
-                return jsonify({'message': response, 'redir': redir if redir != "" else False, 'values': "610"}), 200
-        else:
-
-            if last_theme.strip() == theme.strip():
-                theme_id = last_theme_id
-            else:
-                url = 'http://localhost:5000/api/themes/' 
-                payload = {
-                    'user_id': user_id,
-                    'theme_name': theme
-                }
-                themeJSON = requests.post(url, data=payload)
-                # Обработка ответа и извлечение theme_id
-                if themeJSON.status_code == 201:  # Проверяем успешность запроса
-                    theme_id = themeJSON.json().get('theme_id')
-
-            new_message = Message(theme_id=theme_id, message=message, time=time, type=bool(int(type)), code=code, sender = sender)
-            new_response = Message(theme_id=theme_id, message=response, time=datetime.now().strftime('%Y-%m-%d %H:%M:%S'), type=False, code="000", sender = True)
-            db.session.add(new_message)
-            db.session.add(new_response)
-            db.session.commit()
-
-            inserted_message_id = new_message.id
-
-            return jsonify({'status': True, 'message': response, 'user_msg_time': new_message.time, 'ai_msg_time': new_response.time, 'redir': redir, 'message_id': inserted_message_id}), 201
+    return jsonify({
+        'status': True,
+        'message': assistant_msg,
+        'user_msg_time': user_message.time.strftime('%Y-%m-%d %H:%M:%S'),
+        'ai_msg_time': ai_message.time.strftime('%Y-%m-%d %H:%M:%S'),
+        'redir': redir,
+        'message_id': user_message.id,
+        'chat_id': chat_id,
+        'reasoning_details': reasoning_details
+    }), 201

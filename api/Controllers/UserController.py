@@ -1,8 +1,9 @@
 from flask import jsonify, request
 from Models.User import User, db
-from Models.Role import Role
 from Models.Department import Department
 from Models.RefreshToken import RefreshToken
+from Models.Employee import Employee
+from Models.Manager import Manager
 from datetime import datetime
 from utils.jwt_utils import generate_access_token, generate_refresh_token, decode_access_token
 from utils.auth_helpers import authenticate_user, create_new_user, build_auth_response
@@ -11,158 +12,104 @@ import json
 from flask import jsonify
 from flasgger import swag_from
 
+
+def str_to_bool(value):
+    """Convert form string values to Python boolean."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() in ('true', '1', 'yes')
+    return False
+
+
 @swag_from({
     'tags': ['Users'],
+    'description': 'Получить список всех пользователей',
     'responses': {
         200: {
-            'description': 'Список пользователей',
-            'schema': {
-                'type': 'object',
-                'properties': {
-                    'status': {'type': 'boolean'},
-                    'message': {'type': 'string'},
-                    'data': {
-                        'type': 'array',
-                        'items': {
-                            'type': 'object',
-                            'properties': {
-                                'id': {'type': 'integer'},
-                                'login': {'type': 'string'},
-                                'first_name': {'type': 'string'},
-                                'last_name': {'type': 'string'},
-                                'password': {'type': 'string'},
-                                'roles': {
-                                    'type': 'array',
-                                    'items': {
-                                        'type': 'object',
-                                        'properties': {
-                                            'id': {'type': 'integer'},
-                                            'name': {'type': 'string'}
-                                        }
-                                    }
-                                },
-                                'departments': {
-                                    'type': 'array',
-                                    'items': {
-                                        'type': 'object',
-                                        'properties': {
-                                            'id': {'type': 'integer'},
-                                            'name': {'type': 'string'}
-                                        }
-                                    }
-                                }
-                            }
-                        }
+            'description': 'Список пользователей успешно получен',
+            'examples': {
+                'application/json': [
+                    {
+                        'id': 1,
+                        'login': 'john',
+                        'first_name': 'John',
+                        'last_name': 'Doe',
+                        'password': 'hashed_value',
+                        'is_admin': False,
+                        'description': 'Some text',
+                        'departments': [
+                            {'id': 1, 'name': 'IT'}
+                        ]
                     }
-                }
+                ]
             }
         }
     }
 })
 def get_users():
     users = User.query.all()
-    output = {
-        'status': True if len(users) > 0 else False,
-        'message': "OK" if len(users) > 0 else "Empty table",
-        'data': []
-    }
+    output = {'status': bool(users), 'message': "OK" if users else "Empty table", 'data': []}
+
     for user in users:
-        user_roles = [{'id': role.id, 'name': role.name} for role in user.roles]
-        user_departments = [{'id': dept.id, 'name': dept.name} for dept in user.departments]
-        user_data = {
-            'id': user.id, 
-            'login': user.login, 
-            'first_name': user.first_name, 
-            'last_name': user.last_name, 
+        user_departments = [{'id': d.id, 'name': d.name} for d in user.departments]
+
+        role_info = None
+        if user.role == 'manager':
+            role_info = {'role': 'manager', 'id': user.manager_profile.id}
+        elif user.role == 'employee':
+            role_info = {'role': 'employee', 'id': user.employee_profile.id, 'manager_id': user.manager_id}
+
+        output['data'].append({
+            'id': user.id,
+            'login': user.login,
+            'first_name': user.first_name,
+            'last_name': user.last_name,
             'password': user.password,
-            'roles': user_roles,
-            'departments': user_departments
-        }
-        output['data'].append(user_data)
+            'is_admin': user.is_admin,
+            'description': user.description,
+            'departments': user_departments,
+            'role': role_info
+        })
+
     return jsonify(output)
 
 
 @swag_from({
     'tags': ['Users'],
-    'parameters': [
-        {
-            'name': 'item_id',
-            'in': 'path',
-            'type': 'integer',
-            'required': True,
-            'description': 'ID пользователя'
-        }
-    ],
-    'responses': {
-        200: {
-            'description': 'Информация о пользователе',
-            'schema': {
-                'type': 'object',
-                'properties': {
-                    'status': {'type': 'boolean'},
-                    'message': {'type': 'string'},
-                    'data': {
-                        'type': 'object',
-                        'properties': {
-                            'id': {'type': 'integer'},
-                            'login': {'type': 'string'},
-                            'first_name': {'type': 'string'},
-                            'last_name': {'type': 'string'},
-                            'password': {'type': 'string'},
-                            'roles': {
-                                'type': 'array',
-                                'items': {
-                                    'type': 'object',
-                                    'properties': {
-                                        'id': {'type': 'integer'},
-                                        'name': {'type': 'string'}
-                                    }
-                                }
-                            },
-                            'departments': {
-                                'type': 'array',
-                                'items': {
-                                    'type': 'object',
-                                    'properties': {
-                                        'id': {'type': 'integer'},
-                                        'name': {'type': 'string'}
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        404: {
-            'description': 'Пользователь не найден',
-            'schema': {
-                'type': 'object',
-                'properties': {
-                    'status': {'type': 'boolean'},
-                    'message': {'type': 'string'}
-                }
-            }
-        }
-    }
+    'description': 'Получить конкретного пользователя по ID',
+    'parameters': [{'name': 'item_id', 'in': 'path', 'required': True, 'type': 'integer'}],
+    'responses': {200: {'description': 'Пользователь найден'}, 404: {'description': 'Пользователь не найден'}}
 })
 def get_user(item_id):
     user = User.query.get(item_id)
-    if user:
-        user_roles = [{'id': role.id, 'name': role.name} for role in user.roles]
-        user_departments = [{'id': dept.id, 'name': dept.name} for dept in user.departments]
-        user_data = {
-            'id': user.id, 
-            'login': user.login, 
-            'first_name': user.first_name, 
-            'last_name': user.last_name, 
-            'password': user.password,
-            'roles': user_roles,
-            'departments': user_departments
-        }
-        return jsonify({'status': True, 'message': 'OK', 'data': user_data})
-    else:
+    if not user:
         return jsonify({'status': False, 'message': 'User not found'}), 404
+
+    user_departments = [{'id': d.id, 'name': d.name} for d in user.departments]
+
+    role_info = None
+    if user.role == 'manager':
+        role_info = {'role': 'manager', 'id': user.manager_profile.id}
+    elif user.role == 'employee':
+        role_info = {'role': 'employee', 'id': user.employee_profile.id, 'manager_id': user.manager_id}
+
+    return jsonify({
+        'status': True,
+        'message': 'OK',
+        'data': {
+            'id': user.id,
+            'login': user.login,
+            'first_name': user.first_name,
+            'last_name': user.last_name,
+            'password': user.password,
+            'is_admin': user.is_admin,
+            'description': user.description,
+            'departments': user_departments,
+            'role': role_info
+        }
+    })
+
 
 """
 method=POST
@@ -174,89 +121,26 @@ returns {
     data = inserted user id if success
 }
 """
+
+
 @swag_from({
     'tags': ['Users'],
-    'consumes': ['application/x-www-form-urlencoded', 'multipart/form-data'],
+    'description': 'Создать нового пользователя с ролью',
     'parameters': [
-        {
-            'name': 'login',
-            'in': 'formData',
-            'type': 'string',
-            'required': True,
-            'description': 'Логин пользователя (должен быть уникальным)'
-        },
-        {
-            'name': 'first_name',
-            'in': 'formData',
-            'type': 'string',
-            'required': True,
-            'description': 'Имя пользователя'
-        },
-        {
-            'name': 'last_name',
-            'in': 'formData',
-            'type': 'string',
-            'required': True,
-            'description': 'Фамилия пользователя'
-        },
-        {
-            'name': 'password',
-            'in': 'formData',
-            'type': 'string',
-            'required': True,
-            'description': 'Пароль пользователя'
-        },
-        {
-            'name': 'role_ids',
-            'in': 'formData',
-            'type': 'array',
-            'items': {'type': 'integer'},
-            'collectionFormat': 'multi',
-            'required': False,
-            'description': 'ID ролей пользователя (несколько значений через role_ids=1&role_ids=2)'
-        },
-        {
-            'name': 'department_ids',
-            'in': 'formData',
-            'type': 'array',
-            'items': {'type': 'integer'},
-            'collectionFormat': 'multi',
-            'required': False,
-            'description': 'ID отделов пользователя (несколько значений через department_ids=1&department_ids=2)'
-        }
+        {'name': 'login', 'in': 'formData', 'type': 'string', 'required': True},
+        {'name': 'first_name', 'in': 'formData', 'type': 'string', 'required': True},
+        {'name': 'last_name', 'in': 'formData', 'type': 'string', 'required': True},
+        {'name': 'password', 'in': 'formData', 'type': 'string', 'required': True},
+        {'name': 'is_admin', 'in': 'formData', 'type': 'boolean'},
+        {'name': 'description', 'in': 'formData', 'type': 'string'},
+        {'name': 'department_ids', 'in': 'formData', 'type': 'array', 'items': {'type': 'integer'}, 'collectionFormat': 'multi'},
+        {'name': 'role', 'in': 'formData', 'type': 'string', 'description': 'employee or manager'},
+        {'name': 'manager_id', 'in': 'formData', 'type': 'integer', 'description': 'Only for employees'}
     ],
     'responses': {
-        201: {
-            'description': 'Пользователь успешно добавлен',
-            'schema': {
-                'type': 'object',
-                'properties': {
-                    'status': {'type': 'boolean'},
-                    'message': {'type': 'string'},
-                    'user_id': {'type': 'integer'}
-                }
-            }
-        },
-        400: {
-            'description': 'Ошибка в запросе',
-            'schema': {
-                'type': 'object',
-                'properties': {
-                    'status': {'type': 'boolean'},
-                    'message': {'type': 'string'}
-                }
-            }
-        },
-        409: {
-            'description': 'Пользователь с таким логином уже существует',
-            'schema': {
-                'type': 'object',
-                'properties': {
-                    'status': {'type': 'boolean'},
-                    'message': {'type': 'string'}
-                }
-            }
-        }
+        201: {'description': 'Пользователь успешно создан'},
+        400: {'description': 'Некорректные данные'},
+        409: {'description': 'Пользователь с таким логином уже существует'}
     }
 })
 def add_user():
@@ -264,142 +148,74 @@ def add_user():
     first_name = request.form.get('first_name')
     last_name = request.form.get('last_name')
     password = request.form.get('password')
-    
-    # Получаем роли и отделы из запроса
-    role_ids = request.form.getlist('role_ids')
+    is_admin = str_to_bool(request.form.get('is_admin', False))
+    description = request.form.get('description')
     department_ids = request.form.getlist('department_ids')
+    role = request.form.get('role')
+    manager_id = request.form.get('manager_id')
 
     if not login or not first_name or not last_name or not password:
         return jsonify({'status': False, 'message': 'Missing required fields'}), 400
 
-    existing_user = User.query.filter_by(login=login).first()
-    if existing_user:
+    if User.query.filter_by(login=login).first():
         return jsonify({'status': False, 'message': 'User with this login already exists'}), 409
 
-    new_user = User(login=login, first_name=first_name, last_name=last_name, password=password)
+    new_user = User(
+        login=login,
+        first_name=first_name,
+        last_name=last_name,
+        password=password,
+        is_admin=is_admin,
+        description=description
+    )
     db.session.add(new_user)
+    db.session.flush()  # flush to get new_user.id for role assignment
+
+    # Departments
+    for dept_id in department_ids:
+        department = Department.query.get(dept_id)
+        if department:
+            new_user.departments.append(department)
+
+    # Role assignment
+    if role:
+        role_lower = role.lower()
+        if role_lower == 'manager':
+            manager_profile = Manager(user_id=new_user.id)
+            db.session.add(manager_profile)
+        elif role_lower == 'employee':
+            emp_manager_id = int(manager_id) if manager_id else None
+            employee_profile = Employee(user_id=new_user.id, manager_id=emp_manager_id)
+            db.session.add(employee_profile)
+
     db.session.commit()
-    
-    # Добавляем роли и отделы, если они указаны
-    if role_ids:
-        for role_id in role_ids:
-            role = Role.query.get(role_id)
-            if role:
-                new_user.roles.append(role)
-    
-    if department_ids:
-        for dept_id in department_ids:
-            department = Department.query.get(dept_id)
-            if department:
-                new_user.departments.append(department)
-    
-    db.session.commit()
-    
-    # Получаем ID вставленной записи
-    inserted_user_id = new_user.id
-    
-    return jsonify({'status': True, 'message': 'User added successfully', 'user_id': inserted_user_id}), 201
+    return jsonify({'status': True, 'message': 'User added successfully', 'user_id': new_user.id}), 201
 
 
-"""
-method=PUT
-PUT body: login (unique), first_name, last_name, password
-
-returns {
-    status: true/false,
-    message: 'User updated successfully' / Error
-    data = inserted user id if success
-}
-"""
 @swag_from({
     'tags': ['Users'],
-    'consumes': ['application/x-www-form-urlencoded', 'multipart/form-data'],
+    'description': 'Обновить данные пользователя, включая роль',
     'parameters': [
-        {
-            'name': 'item_id',
-            'in': 'path',
-            'type': 'integer',
-            'required': True,
-            'description': 'ID пользователя для обновления'
-        },
-        {
-            'name': 'login',
-            'in': 'formData',
-            'type': 'string',
-            'required': False,
-            'description': 'Новый логин пользователя'
-        },
-        {
-            'name': 'first_name',
-            'in': 'formData',
-            'type': 'string',
-            'required': False,
-            'description': 'Новое имя пользователя'
-        },
-        {
-            'name': 'last_name',
-            'in': 'formData',
-            'type': 'string',
-            'required': False,
-            'description': 'Новая фамилия пользователя'
-        },
-        {
-            'name': 'password',
-            'in': 'formData',
-            'type': 'string',
-            'required': False,
-            'description': 'Новый пароль пользователя'
-        },
-        {
-            'name': 'role_ids',
-            'in': 'formData',
-            'type': 'array',
-            'items': {'type': 'integer'},
-            'collectionFormat': 'multi',
-            'required': False,
-            'description': 'Обновленный список ID ролей пользователя (несколько значений через role_ids=1&role_ids=2)'
-        },
-        {
-            'name': 'department_ids',
-            'in': 'formData',
-            'type': 'array',
-            'items': {'type': 'integer'},
-            'collectionFormat': 'multi',
-            'required': False,
-            'description': 'Обновленный список ID отделов пользователя (несколько значений через department_ids=1&department_ids=2)'
-        }
+        {'name': 'item_id', 'in': 'path', 'required': True, 'type': 'integer'},
+        {'name': 'body', 'in': 'body', 'required': True, 'schema': {
+            'type': 'object',
+            'properties': {
+                'login': {'type': 'string'},
+                'first_name': {'type': 'string'},
+                'last_name': {'type': 'string'},
+                'password': {'type': 'string'},
+                'is_admin': {'type': 'boolean'},
+                'description': {'type': 'string'},
+                'department_ids': {'type': 'array', 'items': {'type': 'integer'}},
+                'role': {'type': 'string', 'description': 'employee or manager'},
+                'manager_id': {'type': 'integer', 'description': 'Only for employees'}
+            }
+        }}
     ],
     'responses': {
-        200: {
-            'description': 'Пользователь успешно обновлен',
-            'schema': {
-                'type': 'object',
-                'properties': {
-                    'status': {'type': 'boolean'},
-                    'message': {'type': 'string'}
-                }
-            }
-        },
-        404: {
-            'description': 'Пользователь не найден',
-            'schema': {
-                'type': 'object',
-                'properties': {
-                    'status': {'type': 'boolean'},
-                    'message': {'type': 'string'}
-                }
-            }
-        },
-        409: {
-            'description': 'Пользователь с таким логином уже существует',
-            'schema': {
-                'type': 'object',
-                'properties': {
-                    'status': {'type': 'boolean'},
-                    'message': {'type': 'string'}
-                }
-            }
-        }
+        200: {'description': 'Пользователь обновлен'},
+        404: {'description': 'Пользователь не найден'},
+        400: {'description': 'Некорректные данные'}
     }
 })
 def update_user(item_id):
@@ -411,38 +227,51 @@ def update_user(item_id):
     first_name = request.form.get('first_name')
     last_name = request.form.get('last_name')
     password = request.form.get('password')
-    
-    # Получаем роли и отделы из запроса
-    role_ids = request.form.getlist('role_ids')
+    is_admin = request.form.get('is_admin')
+    description = request.form.get('description')
     department_ids = request.form.getlist('department_ids')
+    role = request.form.get('role')
+    manager_id = request.form.get('manager_id')
 
+    # Update basic fields
     if login:
-        existing_user = User.query.filter_by(login=login).first()
-        if existing_user:
-            return jsonify({'status': False, 'message': 'User with this login already exists'}), 409
+        if User.query.filter(User.id != item_id, User.login == login).first():
+            return jsonify({'status': False, 'message': 'Login already taken'}), 409
         user.login = login
     if first_name:
         user.first_name = first_name
     if last_name:
         user.last_name = last_name
     if password:
-        user.password = password
-        
-    # Обновляем роли, если они указаны
-    if role_ids is not None:  # Проверяем, что параметр передан (может быть пустым списком)
-        user.roles.clear()
-        for role_id in role_ids:
-            role = Role.query.get(role_id)
-            if role:
-                user.roles.append(role)
-    
-    # Обновляем отделы, если они указаны
-    if department_ids is not None:  # Проверяем, что параметр передан (может быть пустым списком)
+        user.set_password(password)
+    if is_admin is not None:
+        user.is_admin = str_to_bool(is_admin)
+    if description is not None:
+        user.description = description
+
+    # Update departments
+    if department_ids:
         user.departments.clear()
         for dept_id in department_ids:
             department = Department.query.get(dept_id)
             if department:
                 user.departments.append(department)
+
+    # Update role
+    if role:
+        role_lower = role.lower()
+        # Remove old roles
+        if user.role == 'manager' and user.manager_profile:
+            db.session.delete(user.manager_profile)
+        elif user.role == 'employee' and user.employee_profile:
+            db.session.delete(user.employee_profile)
+
+        # Assign new role
+        if role_lower == 'manager':
+            db.session.add(Manager(user_id=user.id))
+        elif role_lower == 'employee':
+            emp_manager_id = int(manager_id) if manager_id else None
+            db.session.add(Employee(user_id=user.id, manager_id=emp_manager_id))
 
     db.session.commit()
     return jsonify({'status': True, 'message': 'User updated successfully'})
@@ -709,3 +538,201 @@ def register():
     
     response_data, user = result
     return build_auth_response('User registered successfully', response_data)
+
+# ----------------------- MANAGER CRUD -----------------------
+
+@swag_from({
+    'tags': ['Managers'],
+    'description': 'Get all managers',
+    'responses': {200: {'description': 'List of managers'}}
+})
+def get_managers():
+    managers = Manager.query.all()
+    data = []
+    for m in managers:
+        data.append({
+            'id': m.id,
+            'user_id': m.user_id,
+            'login': m.user.login,
+            'first_name': m.user.first_name,
+            'last_name': m.user.last_name,
+            'description': m.user.description
+        })
+    return jsonify({'status': True, 'message': 'OK', 'data': data})
+
+
+@swag_from({
+    'tags': ['Managers'],
+    'description': 'Get manager by ID',
+    'parameters': [{'name': 'item_id', 'in': 'path', 'required': True, 'type': 'integer'}],
+    'responses': {200: {'description': 'Manager found'}, 404: {'description': 'Manager not found'}}
+})
+def get_manager(item_id):
+    manager = Manager.query.get(item_id)
+    if not manager:
+        return jsonify({'status': False, 'message': 'Manager not found'}), 404
+    data = {
+        'id': manager.id,
+        'user_id': manager.user_id,
+        'login': manager.user.login,
+        'first_name': manager.user.first_name,
+        'last_name': manager.user.last_name,
+        'description': manager.user.description
+    }
+    return jsonify({'status': True, 'message': 'OK', 'data': data})
+
+
+@swag_from({
+    'tags': ['Managers'],
+    'description': 'Create a new manager',
+    'parameters': [
+        {'name': 'user_id', 'in': 'formData', 'type': 'integer', 'required': True},
+    ],
+    'responses': {201: {'description': 'Manager created'}, 400: {'description': 'Invalid data'}}
+})
+def add_manager():
+    user_id = request.form.get('user_id')
+    if not user_id or Manager.query.filter_by(user_id=user_id).first():
+        return jsonify({'status': False, 'message': 'Invalid or duplicate user_id'}), 400
+    manager = Manager(user_id=user_id)
+    db.session.add(manager)
+    db.session.commit()
+    return jsonify({'status': True, 'message': 'Manager added', 'data': {'id': manager.id}}), 201
+
+
+@swag_from({
+    'tags': ['Managers'],
+    'description': 'Update manager (link to user)',
+    'parameters': [
+        {'name': 'item_id', 'in': 'path', 'required': True, 'type': 'integer'},
+        {'name': 'user_id', 'in': 'formData', 'type': 'integer', 'required': True}
+    ],
+    'responses': {200: {'description': 'Manager updated'}, 404: {'description': 'Manager not found'}}
+})
+def update_manager(item_id):
+    manager = Manager.query.get(item_id)
+    if not manager:
+        return jsonify({'status': False, 'message': 'Manager not found'}), 404
+    user_id = request.form.get('user_id')
+    if user_id:
+        manager.user_id = user_id
+    db.session.commit()
+    return jsonify({'status': True, 'message': 'Manager updated'})
+
+
+@swag_from({
+    'tags': ['Managers'],
+    'description': 'Delete manager by ID',
+    'parameters': [{'name': 'item_id', 'in': 'path', 'required': True, 'type': 'integer'}],
+    'responses': {200: {'description': 'Manager deleted'}, 404: {'description': 'Manager not found'}}
+})
+def delete_manager(item_id):
+    manager = Manager.query.get(item_id)
+    if not manager:
+        return jsonify({'status': False, 'message': 'Manager not found'}), 404
+    db.session.delete(manager)
+    db.session.commit()
+    return jsonify({'status': True, 'message': 'Manager deleted'})
+
+# ----------------------- EMPLOYEE CRUD -----------------------
+
+@swag_from({
+    'tags': ['Employees'],
+    'description': 'Get all employees',
+    'responses': {200: {'description': 'List of employees'}}
+})
+def get_employees():
+    employees = Employee.query.all()
+    data = []
+    for e in employees:
+        data.append({
+            'id': e.id,
+            'user_id': e.user_id,
+            'login': e.user.login,
+            'first_name': e.user.first_name,
+            'last_name': e.user.last_name,
+            'description': e.user.description,
+            'manager_id': e.manager_id
+        })
+    return jsonify({'status': True, 'message': 'OK', 'data': data})
+
+
+@swag_from({
+    'tags': ['Employees'],
+    'description': 'Get employee by ID',
+    'parameters': [{'name': 'item_id', 'in': 'path', 'required': True, 'type': 'integer'}],
+    'responses': {200: {'description': 'Employee found'}, 404: {'description': 'Employee not found'}}
+})
+def get_employee(item_id):
+    employee = Employee.query.get(item_id)
+    if not employee:
+        return jsonify({'status': False, 'message': 'Employee not found'}), 404
+    data = {
+        'id': employee.id,
+        'user_id': employee.user_id,
+        'login': employee.user.login,
+        'first_name': employee.user.first_name,
+        'last_name': employee.user.last_name,
+        'description': employee.user.description,
+        'manager_id': employee.manager_id
+    }
+    return jsonify({'status': True, 'message': 'OK', 'data': data})
+
+
+@swag_from({
+    'tags': ['Employees'],
+    'description': 'Create a new employee',
+    'parameters': [
+        {'name': 'user_id', 'in': 'formData', 'type': 'integer', 'required': True},
+        {'name': 'manager_id', 'in': 'formData', 'type': 'integer'}
+    ],
+    'responses': {201: {'description': 'Employee created'}, 400: {'description': 'Invalid data'}}
+})
+def add_employee():
+    user_id = request.form.get('user_id')
+    manager_id = request.form.get('manager_id')
+    if not user_id or Employee.query.filter_by(user_id=user_id).first():
+        return jsonify({'status': False, 'message': 'Invalid or duplicate user_id'}), 400
+    employee = Employee(user_id=user_id, manager_id=manager_id)
+    db.session.add(employee)
+    db.session.commit()
+    return jsonify({'status': True, 'message': 'Employee added', 'data': {'id': employee.id}}), 201
+
+
+@swag_from({
+    'tags': ['Employees'],
+    'description': 'Update employee',
+    'parameters': [
+        {'name': 'item_id', 'in': 'path', 'required': True, 'type': 'integer'},
+        {'name': 'user_id', 'in': 'formData', 'type': 'integer'},
+        {'name': 'manager_id', 'in': 'formData', 'type': 'integer'}
+    ],
+    'responses': {200: {'description': 'Employee updated'}, 404: {'description': 'Employee not found'}}
+})
+def update_employee(item_id):
+    employee = Employee.query.get(item_id)
+    if not employee:
+        return jsonify({'status': False, 'message': 'Employee not found'}), 404
+    user_id = request.form.get('user_id')
+    manager_id = request.form.get('manager_id')
+    if user_id:
+        employee.user_id = user_id
+    if manager_id is not None:
+        employee.manager_id = manager_id
+    db.session.commit()
+    return jsonify({'status': True, 'message': 'Employee updated'})
+
+
+@swag_from({
+    'tags': ['Employees'],
+    'description': 'Delete employee by ID',
+    'parameters': [{'name': 'item_id', 'in': 'path', 'required': True, 'type': 'integer'}],
+    'responses': {200: {'description': 'Employee deleted'}, 404: {'description': 'Employee not found'}}
+})
+def delete_employee(item_id):
+    employee = Employee.query.get(item_id)
+    if not employee:
+        return jsonify({'status': False, 'message': 'Employee not found'}), 404
+    db.session.delete(employee)
+    db.session.commit()
+    return jsonify({'status': True, 'message': 'Employee deleted'})
