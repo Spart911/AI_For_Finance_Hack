@@ -117,7 +117,7 @@ method=GET
 returns {
     status: true/false,
     message: OK / Error
-    data = {{id, theme_id, message, time, type, code, sender}, ...} if success
+    data = {{id, theme_id, message, time, type, sender}, ...} if success
 }
 
 sender: false -> user / true -> server
@@ -141,7 +141,6 @@ sender: false -> user / true -> server
                             'message': {'type': 'string'},
                             'time': {'type': 'string'},
                             'type': {'type': 'boolean'},
-                            'code': {'type': 'string'},
                             'sender': {'type': 'boolean'}
                         }
                         }
@@ -164,7 +163,6 @@ def get_messages():
             'message': message.message,
             'time': message.time,
             'type': message.type,
-            'code': message.code,
             'sender': message.sender
         }
         output['data'].append(user_data)
@@ -176,7 +174,7 @@ method=GET/message_id
 returns {
     status: true/false,
     message: OK / Error
-    data = {id, theme_id, message, time, type, code, sender} if success
+    data = {id, theme_id, message, time, type, sender} if success
 }
 
 sender: 0 -> user / 1 -> server
@@ -207,7 +205,6 @@ sender: 0 -> user / 1 -> server
                             'message': {'type': 'string'},
                             'time': {'type': 'string'},
                             'type': {'type': 'boolean'},
-                            'code': {'type': 'string'},
                             'sender': {'type': 'boolean'}
                         }
                     }
@@ -234,7 +231,6 @@ def get_message(item_id):
             'message': message.message,
             'time': message.time,
             'type': message.type,
-            'code': message.code,
             'sender': message.sender
         }
         return jsonify({'status': True, 'message': 'OK', 'data': user_data})
@@ -268,7 +264,6 @@ def get_message(item_id):
             'description': 'Тип сообщения (0 - текст, 1 - аудио)'
         },
         {
-            'name': 'code',
             'in': 'formData',
             'type': 'string',
             'required': True,
@@ -316,12 +311,10 @@ def add_message():
     chat_id = request.form.get('chat_id')
     time_now = datetime.now()
     msg_type = request.form.get('type', 2)
-    code = request.form.get('code')
     sender = False
     redir = ""
 
-    if int(user_id) < 1 or not msg_type or not code:
-        return jsonify({'status': False, 'message': 'Missing required fields'}), 400
+
 
     # Ensure user exists
     user = User.query.get(user_id)
@@ -369,7 +362,6 @@ def add_message():
         message=message_text,
         time=time_now,
         type=bool(int(msg_type)),
-        code=code,
         sender=sender,
         chat_id=chat_id
     )
@@ -377,7 +369,6 @@ def add_message():
         message=assistant_msg,
         time=datetime.now(),
         type=False,
-        code="000",
         sender=True,
         chat_id=chat_id
     )

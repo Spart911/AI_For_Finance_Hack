@@ -13,6 +13,7 @@ from qdrant_client.http.models import VectorParams, Distance, PointStruct
 import nltk
 from nltk.tokenize import sent_tokenize
 nltk.download("punkt")
+nltk.download("punkt_tab")
 
 # -------------------- ENV VARIABLES --------------------
 QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
@@ -50,20 +51,22 @@ def fetch_documents(limit: Optional[int] = None) -> List[Dict[str, Any]]:
     documents = []
     for meta in docs_meta:
         doc_id = meta["id"]
-        title = meta.get("name", "")
+        filename = meta.get("name", "")
         path = meta.get("path", "")
         if not path:
             content = ""
         else:
-            # 2️⃣ Считываем текст по path
-            # предполагаем, что path — это полный URL
-            r = requests.get(path)
-            r.raise_for_status()
-            content = r.text
+            file_path = os.path.join(path, filename)
+
+        if not os.path.exists(file_path):
+            content = ""
+        else:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
 
         documents.append({
             "id": doc_id,
-            "title": title,
+            "title": filename,
             "content": content
         })
 
@@ -75,7 +78,7 @@ class QdrantRAG:
     def __init__(self):
         self.model = SentenceTransformer(EMBED_MODEL)
         self.dim = self.model.get_sentence_embedding_dimension()
-        self.client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        self.client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT, check_compatibility=False)
 
     def init_collection(self):
         colls = self.client.get_collections().collections
