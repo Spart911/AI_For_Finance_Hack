@@ -1,31 +1,24 @@
-from database import db
 import bcrypt
-from Models.UserDepartment import user_department
-from Models.Department import Department
+from database import db
 from Models.Chat import Chat
 
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     login = db.Column(db.String(50), unique=True)
-    first_name = db.Column(db.String(50), unique=False)
-    last_name = db.Column(db.String(50), unique=False)
-    password = db.Column(db.String(500), unique=False)
+    first_name = db.Column(db.String(50))
+    last_name = db.Column(db.String(50))
+    password = db.Column(db.String(500))
     is_admin = db.Column(db.Boolean, default=False, nullable=False)
     description = db.Column(db.Text, nullable=True)
 
-    departments = db.relationship(
-        'Department',
-        secondary=user_department,
-        lazy='subquery',
-        backref=db.backref('users', lazy=True)
-    )
+    # Relationships
+    chats = db.relationship('Chat', backref='user', lazy=True, cascade="all, delete")
+    llm_memories = db.relationship('LLMMemory', back_populates='user', lazy=True, cascade="all, delete")
 
-    chats = db.relationship(
-        'Chat',
-        backref='user',
-        lazy=True,
-        cascade="all, delete"
-    )
+    # Optional relationships for DocCall and DocPermission
+    doc_calls = db.relationship('DocCall', back_populates='user', lazy=True, cascade="all, delete")
+    issued_permissions = db.relationship('DocPermission', foreign_keys='DocPermission.issuer_id', back_populates='issuer', lazy=True)
+    received_permissions = db.relationship('DocPermission', foreign_keys='DocPermission.recipient_id', back_populates='recipient', lazy=True)
 
     @property
     def role(self):
@@ -33,17 +26,11 @@ class User(db.Model):
             return 'manager'
         elif hasattr(self, 'employee_profile') and self.employee_profile:
             return 'employee'
-        else:
-            return None
-
+        return None
 
     @property
     def manager_id(self):
-        """Return manager_id if user is employee, else None"""
-        if self.role == 'employee':
-            return self.employee_profile.manager_id
-        return None
-    
+        return self.employee_profile.manager_id if self.role == 'employee' else None
 
     def __init__(self, login, first_name, last_name, password=None, is_admin=False, description=None):
         self.login = login
@@ -51,7 +38,6 @@ class User(db.Model):
         self.last_name = last_name
         self.is_admin = is_admin
         self.description = description
-
         if password:
             self.set_password(password)
 

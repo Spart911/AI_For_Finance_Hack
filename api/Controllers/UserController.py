@@ -1,6 +1,5 @@
 from flask import jsonify, request
 from Models.User import User, db
-from Models.Department import Department
 from Models.RefreshToken import RefreshToken
 from Models.Employee import Employee
 from Models.Manager import Manager
@@ -9,7 +8,7 @@ from utils.jwt_utils import generate_access_token, generate_refresh_token, decod
 from utils.auth_helpers import authenticate_user, create_new_user, build_auth_response
 
 import json
-from flask import jsonify
+from flask import jsonify, Blueprint
 from flasgger import swag_from
 
 
@@ -52,8 +51,6 @@ def get_users():
     output = {'status': bool(users), 'message': "OK" if users else "Empty table", 'data': []}
 
     for user in users:
-        user_departments = [{'id': d.id, 'name': d.name} for d in user.departments]
-
         role_info = None
         if user.role == 'manager':
             role_info = {'role': 'manager', 'id': user.manager_profile.id}
@@ -68,7 +65,6 @@ def get_users():
             'password': user.password,
             'is_admin': user.is_admin,
             'description': user.description,
-            'departments': user_departments,
             'role': role_info
         })
 
@@ -85,8 +81,6 @@ def get_user(item_id):
     user = User.query.get(item_id)
     if not user:
         return jsonify({'status': False, 'message': 'User not found'}), 404
-
-    user_departments = [{'id': d.id, 'name': d.name} for d in user.departments]
 
     role_info = None
     if user.role == 'manager':
@@ -105,7 +99,6 @@ def get_user(item_id):
             'password': user.password,
             'is_admin': user.is_admin,
             'description': user.description,
-            'departments': user_departments,
             'role': role_info
         }
     })
@@ -133,7 +126,6 @@ returns {
         {'name': 'password', 'in': 'formData', 'type': 'string', 'required': True},
         {'name': 'is_admin', 'in': 'formData', 'type': 'boolean'},
         {'name': 'description', 'in': 'formData', 'type': 'string'},
-        {'name': 'department_ids', 'in': 'formData', 'type': 'array', 'items': {'type': 'integer'}, 'collectionFormat': 'multi'},
         {'name': 'role', 'in': 'formData', 'type': 'string', 'description': 'employee or manager'},
         {'name': 'manager_id', 'in': 'formData', 'type': 'integer', 'description': 'Only for employees'}
     ],
@@ -150,7 +142,6 @@ def add_user():
     password = request.form.get('password')
     is_admin = str_to_bool(request.form.get('is_admin', False))
     description = request.form.get('description')
-    department_ids = request.form.getlist('department_ids')
     role = request.form.get('role')
     manager_id = request.form.get('manager_id')
 
@@ -170,12 +161,6 @@ def add_user():
     )
     db.session.add(new_user)
     db.session.flush()  # flush to get new_user.id for role assignment
-
-    # Departments
-    for dept_id in department_ids:
-        department = Department.query.get(dept_id)
-        if department:
-            new_user.departments.append(department)
 
     # Role assignment
     if role:
@@ -206,7 +191,6 @@ def add_user():
                 'password': {'type': 'string'},
                 'is_admin': {'type': 'boolean'},
                 'description': {'type': 'string'},
-                'department_ids': {'type': 'array', 'items': {'type': 'integer'}},
                 'role': {'type': 'string', 'description': 'employee or manager'},
                 'manager_id': {'type': 'integer', 'description': 'Only for employees'}
             }
@@ -229,7 +213,6 @@ def update_user(item_id):
     password = request.form.get('password')
     is_admin = request.form.get('is_admin')
     description = request.form.get('description')
-    department_ids = request.form.getlist('department_ids')
     role = request.form.get('role')
     manager_id = request.form.get('manager_id')
 
@@ -248,14 +231,6 @@ def update_user(item_id):
         user.is_admin = str_to_bool(is_admin)
     if description is not None:
         user.description = description
-
-    # Update departments
-    if department_ids:
-        user.departments.clear()
-        for dept_id in department_ids:
-            department = Department.query.get(dept_id)
-            if department:
-                user.departments.append(department)
 
     # Update role
     if role:

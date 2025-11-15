@@ -15,6 +15,9 @@ from flasgger import swag_from
 
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
+from flask import Blueprint
+message_bp = Blueprint("message_bp", __name__)
+
 
 def _load_env_from_file():
     # Пытаемся загрузить ключ из ближайших .env без выхода за пределы родителей

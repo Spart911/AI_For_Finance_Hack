@@ -1,7 +1,8 @@
 from database import db  
+from flask import Blueprint
 from Models.Document import Document
 
-
+document_bp = Blueprint("document_bp", __name__)
 
 # ------------------ CRUD Functions ------------------
 
