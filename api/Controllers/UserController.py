@@ -135,7 +135,7 @@ returns {
         409: {'description': 'Пользователь с таким логином уже существует'}
     }
 })
-def add_user():
+def add_user():  # Добавить логин и пароль создающего и проверять что он админ 
     login = request.form.get('login')
     first_name = request.form.get('first_name')
     last_name = request.form.get('last_name')

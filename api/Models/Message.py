@@ -5,16 +5,14 @@ class Message(db.Model):
     message = db.Column(db.String(2048), unique=False)
     time = db.Column(db.DateTime, unique=False)
     type = db.Column(db.Boolean) # 0 - text, 1 - audio
-    code = db.Column(db.String(4), unique=False)
     sender = db.Column(db.Boolean) # 0 - user, 1 - server
     chat_id = db.Column(db.Integer, db.ForeignKey('chat.id'), nullable=False)
 
 
-    def __init__(self, message, time, type, code, sender, chat_id):  
+    def __init__(self, message, time, type, sender, chat_id):  
         self.message = message 
         self.time = time
         self.type = type
-        self.code = code 
         self.sender = sender
         self.chat_id = chat_id
 
