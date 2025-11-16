@@ -8,3 +8,13 @@ qdrant-client
 nltk
 tqdm
 pydantic
+
+# OCR / Документы
+paddleocr
+paddlepaddle  # или paddlepaddle-gpu, если есть CUDA
+pdf2image
+pdfplumber
+python-docx
+beautifulsoup4
+Pillow
+lxml

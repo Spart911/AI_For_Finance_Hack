@@ -7,6 +7,11 @@ WORKDIR /app
 # Копируем файлы
 COPY . /app
 
+RUN apt-get update && apt-get install -y \
+    libgl1 \
+    libglib2.0-0 \
+    poppler-utils
+
 # Установим зависимости
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
