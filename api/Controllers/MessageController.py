@@ -4,6 +4,7 @@ from Models.User import User
 from Models.Chat import Chat
 from sqlalchemy import desc
 from datetime import datetime
+from Models.DocCall import DocCall
 import speech_recognition as sr
 import asyncio
 import json
@@ -40,7 +41,6 @@ def rerank_local(query: str, documents: list, top_k: int = 3):
     # сортируем по убыванию
     ranked = sorted(zip(documents, scores), key=lambda x: x[1], reverse=True)
 
-    # возвращаем только документы
     return [doc for doc, score in ranked[:top_k]]
 
 QDRANT_HOST = "qdrant"  
@@ -151,6 +151,9 @@ def audio_to_text(audio):
     return text
 
 def query_rag_context(query: str, top_k=5, return_list=False):
+    """
+    Возвращает топ-K документов для RAG с текстом и метаданными
+    """
     try:
         emb = rag_model.encode(query).tolist()
         results = rag_client.search(
@@ -158,13 +161,24 @@ def query_rag_context(query: str, top_k=5, return_list=False):
             query_vector=emb,
             limit=top_k
         )
-        docs = [hit.payload.get("text", "") for hit in results]
-        return docs if return_list else "\n".join(docs).strip()
+        docs = []
+        for hit in results:
+            docs.append({
+                'text': hit.payload.get("text", ""),
+                'doc_id': hit.payload.get("doc_id", hit.id)  # уникальный id документа
+            })
+
+        if return_list:
+            return docs
+        else:
+            return "\n".join([d['text'] for d in docs]).strip()
     except Exception as e:
-        return [] if return_list else f"RAG context unavailable: {e}"
+        if return_list:
+            return []
+        return f"RAG context unavailable: {e}"
 
 
-def request_gpt_openrouter(text, previous_messages=None, description=None):
+def request_gpt_openrouter(text, previous_messages=None, description=None, user_id=None):
     """
     Sends a request to OpenRouter GPT-5.1 with reasoning support.
     previous_messages: list of dicts [{'role': 'user'/'assistant', 'content': str, 'reasoning_details': {...}}]
@@ -174,11 +188,27 @@ def request_gpt_openrouter(text, previous_messages=None, description=None):
     # сначала получаем много кандидатов
     raw_context_docs = query_rag_context(text, top_k=10, return_list=True)
 
-    # затем делаем rerank
-    top_docs = rerank_local(text, raw_context_docs, top_k=3)
+    # Берём только тексты для CrossEncoder
+    doc_texts = [d['text'] for d in raw_context_docs]
 
-    # объединяем как строку для промпта
-    context = "\n\n".join(top_docs)
+    # Rerank
+    top_texts = rerank_local(text, doc_texts, top_k=3)
+
+    # Восстанавливаем словари с doc_id
+    top_docs = [d for d in raw_context_docs if d['text'] in top_texts]
+
+    context = "\n\n".join([d['text'] for d in top_docs])
+
+    if user_id:
+        for d in top_docs:
+            doc_id = d['doc_id']
+            dc = DocCall.query.filter_by(user_id=user_id, doc_id=doc_id).first()
+            if dc:
+                dc.call_count += 1
+            else:
+                dc = DocCall(user_id=user_id, doc_id=doc_id, call_count=1)
+                db.session.add(dc)
+        db.session.commit()
 
     
     system_prompt = f"Ты - документный помощник, который развернуто и грамотно отвечает на вопросы с использованием информации из предоставленного документа. Твоя задача помогать в рабочих задачах, вот основная информация про меня: {description}"
@@ -466,7 +496,7 @@ def add_message():
             return jsonify({'status': False, 'message': 'Message text is required'}), 400
 
     # Отправка запроса
-    assistant_msg_obj = request_gpt_openrouter(message_text, previous_messages=previous_messages, description=user_description)
+    assistant_msg_obj = request_gpt_openrouter(message_text, previous_messages=previous_messages, description=user_description,user_id=user_id)
 
     # Извлечение данных из словаря
     assistant_msg = assistant_msg_obj.get("content", "")
