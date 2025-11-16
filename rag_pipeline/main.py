@@ -214,20 +214,31 @@ class QdrantRAG:
 
     def get_indexed_doc_ids(self) -> Set[Any]:
         """
-        Получаем набор doc_id, которые уже содержатся в коллекции (через payload).
-        Используем scroll() — при большом количестве точек возможно нужно page-ить.
+        Получаем множество doc_id, которые уже есть в коллекции.
+        Используем scroll(), учитывая что он возвращает (points, next_page_offset).
         """
         indexed: Set[Any] = set()
         try:
-            # Попытка получить много точек сразу; если очень много — можно сегментировать
-            scroll_res = self.client.scroll(collection_name=COLLECTION_NAME, limit=100000, with_payload=True)
-            for p in scroll_res.points:
-                payload = p.payload or {}
-                if "doc_id" in payload:
-                    indexed.add(payload["doc_id"])
+            offset = None
+            while True:
+                points, next_page = self.client.scroll(
+                    collection_name=COLLECTION_NAME,
+                    limit=1000,
+                    with_payload=True,
+                    offset=offset
+                )
+                for p in points:
+                    payload = p.payload or {}
+                    if "doc_id" in payload:
+                        indexed.add(payload["doc_id"])
+
+                if next_page is None:
+                    break
+                offset = next_page
+
         except Exception as e:
-            # fallback: если scroll не сработал — вернём пустой набор
             print("get_indexed_doc_ids error:", e)
+
         return indexed
 
     def build(self, docs: List[Dict[str, Any]], reindex_existing: bool = False):
