@@ -6,10 +6,12 @@ anyio==4.3.0
 async-timeout==4.0.3
 attrs==23.2.0
 beautifulsoup4==4.12.3
+qdrant-client
 blinker==1.7.0
 bottle==0.12.25
 Brotli==1.1.0
 browser-cookie3==0.19.1
+sentence-transformers
 cairocffi==1.6.1
 CairoSVG==2.7.1
 certifi==2024.2.2

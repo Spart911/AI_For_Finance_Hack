@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile
     ports:
       - "5000:5000"
+    env_file: .env
     volumes:
       - ./app/:/home/app/
     depends_on:

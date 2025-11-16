@@ -12,11 +12,24 @@ from pathlib import Path
 import re
 from openai import OpenAI
 from flasgger import swag_from
+from qdrant_client import QdrantClient
+from sentence_transformers import SentenceTransformer
+rag_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+    
+
+
+
+QDRANT_HOST = "qdrant"  
+QDRANT_PORT = 6333
+COLLECTION_NAME = "documents_rag"
+
+rag_client = QdrantClient(
+    host=QDRANT_HOST,
+    port=QDRANT_PORT
+)
 
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
-
-from flask import Blueprint
-message_bp = Blueprint("message_bp", __name__)
 
 
 def _load_env_from_file():
@@ -59,9 +72,11 @@ _load_env_from_file()
 
 
 client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
+    base_url="https://api.polza.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY")
 )
+
+
 
 def _auth_header() -> str:
     token = os.getenv("OPENROUTER_API_KEY", "").strip()
@@ -84,6 +99,22 @@ def audio_to_text(audio):
 
     return text
 
+def query_rag_context(query: str, top_k=1) -> str:
+    """
+    Выполняет поиск по Qdrant и возвращает объединённый текст из наиболее релевантных чанков.
+    """
+    try:
+        emb = rag_model.encode(query).tolist() 
+        results = rag_client.search(
+            collection_name=COLLECTION_NAME,
+            query_vector=emb,
+            limit=top_k
+        )
+        context_chunks = [hit.payload.get("text", "") for hit in results]
+
+        return "\n".join(context_chunks).strip()
+    except Exception as e:
+        return f"RAG context unavailable: {e}"
 
 def request_gpt_openrouter(text, previous_messages=None):
     """
@@ -91,27 +122,49 @@ def request_gpt_openrouter(text, previous_messages=None):
     previous_messages: list of dicts [{'role': 'user'/'assistant', 'content': str, 'reasoning_details': {...}}]
     """
     asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+    
+    context = query_rag_context(text)
+    
+    system_prompt = "Ты - финансовый помощник, который развернуто и грамотно отвечает на вопросы с использованием информации из предоставленного документа."
 
-    # Build messages list
+    user_content = f'Контекст: {context}. Вопрос: {text}'
+    
     messages = [
-        {"role": "system", "content": "Ты голосовой помощник банка. Отвечай кратко и по делу."},
-        {"role": "user", "content": text}
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content}
     ]
 
     if previous_messages:
-        # Append previous conversation preserving reasoning details
-        for msg in previous_messages:
-            messages.append(msg)
+        messages.extend(previous_messages)
 
     try:
         response = client.chat.completions.create(
-            model="openai/gpt-5.1",
+            model="qwen/qwen-turbo",
             messages=messages,
             extra_body={"reasoning": {"enabled": True}}
         )
-        return response.choices[0].message
+        
+        msg = response.choices[0].message
+        if isinstance(msg, dict):
+            content = msg.get("content", "")
+            reasoning_details = msg.get("reasoning_details", {})
+        else:
+            content = msg.content
+            reasoning_details = {}
+
+        # Возвращаем словарь с контекстом и ответом
+        return {
+            "content": content,
+            "reasoning_details": reasoning_details,
+            "context": context
+        }
     except Exception as e:
-        return {"content": f"Ошибка запроса к AI: {e}", "reasoning_details": {}}
+        return {
+            "content": f"Ошибка запроса к AI: {e}",
+            "reasoning_details": {},
+            "context": context
+        }
+
 
 
 """
@@ -313,18 +366,16 @@ def add_message():
     user_id = request.form.get('user_id', -1)
     chat_id = request.form.get('chat_id')
     time_now = datetime.now()
-    msg_type = request.form.get('type', 2)
+    msg_type = request.form.get('type', '0')  # по умолчанию текст
     sender = False
     redir = ""
 
-
-
-    # Ensure user exists
+    # Проверяем, что пользователь существует
     user = User.query.get(user_id)
     if not user:
         return jsonify({'status': False, 'message': 'User not found'}), 404
 
-    # Handle chat creation if chat_id not provided
+    # Создаём чат, если chat_id не указан
     if not chat_id:
         new_chat = Chat(name=f"Chat with User {user_id}", user_id=user_id)
         db.session.add(new_chat)
@@ -336,7 +387,7 @@ def add_message():
         if not chat:
             return jsonify({'status': False, 'message': 'Chat not found'}), 404
 
-    # Handle audio messages
+    # Обрабатываем аудио-сообщения
     if msg_type == '1':
         if 'message' not in request.files:
             return jsonify({'status': False, 'message': 'No file part'}), 400
@@ -347,20 +398,15 @@ def add_message():
         if not message_text:
             return jsonify({'status': False, 'message': 'Message text is required'}), 400
 
-    # Send to GPT-5.1 via OpenRouter
+    # Отправка запроса к GPT-5.1 через OpenRouter
     assistant_msg_obj = request_gpt_openrouter(message_text)
-    assistant_msg = (
-        assistant_msg_obj.get("content")
-        if isinstance(assistant_msg_obj, dict)
-        else assistant_msg_obj.content
-    )
-    reasoning_details = (
-        assistant_msg_obj.get("reasoning_details", {})
-        if isinstance(assistant_msg_obj, dict)
-        else getattr(assistant_msg_obj, "reasoning_details", {})
-    )
 
-    # Store messages in DB
+    # Извлечение данных из словаря
+    assistant_msg = assistant_msg_obj.get("content", "")
+    reasoning_details = assistant_msg_obj.get("reasoning_details", {})
+    rag_context = assistant_msg_obj.get("context", "")
+
+    # Сохраняем сообщение пользователя в БД
     user_message = Message(
         message=message_text,
         time=time_now,
@@ -368,6 +414,7 @@ def add_message():
         sender=sender,
         chat_id=chat_id
     )
+    # Сохраняем сообщение AI в БД
     ai_message = Message(
         message=assistant_msg,
         time=datetime.now(),
@@ -379,10 +426,11 @@ def add_message():
     db.session.add(user_message)
     db.session.add(ai_message)
     db.session.commit()
-
+    
     return jsonify({
         'status': True,
         'message': assistant_msg,
+        'rag_context': rag_context,  # возвращаем RAG-контекст
         'user_msg_time': user_message.time.strftime('%Y-%m-%d %H:%M:%S'),
         'ai_msg_time': ai_message.time.strftime('%Y-%m-%d %H:%M:%S'),
         'redir': redir,
