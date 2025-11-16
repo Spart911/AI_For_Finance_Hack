@@ -1,5 +1,6 @@
 from flask import jsonify, request
 from Models.Message import Message, db
+from Models.DocPermission import DocPermission
 from Models.User import User
 from Models.Chat import Chat
 from sqlalchemy import desc
@@ -185,6 +186,13 @@ def request_gpt_openrouter(text, previous_messages=None, description=None, user_
     """
     asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
     
+    if user_id:
+        # Получаем все разрешения пользователя
+        permissions = DocPermission.query.filter_by(issuer_id=user_id).all()
+        permitted_doc_ids = {p.doc_id for p in permissions}  # множество ID доступных документов
+    else:
+        return {"status": False, "message": "User not found"}
+
     # сначала получаем много кандидатов
     raw_context_docs = query_rag_context(text, top_k=10, return_list=True)
 
@@ -194,11 +202,23 @@ def request_gpt_openrouter(text, previous_messages=None, description=None, user_
     # Rerank
     top_texts = rerank_local(text, doc_texts, top_k=3)
 
-    # Восстанавливаем словари с doc_id
-    top_docs = [d for d in raw_context_docs if d['text'] in top_texts]
 
+    # Восстанавливаем словари с doc_id и проверяем доступ
+    top_docs = []
+    doc_access_info = {}
+    for i, d in enumerate(raw_context_docs):
+        if d['text'] in top_texts:
+            doc_id = d['doc_id']
+            has_permission = doc_id in permitted_doc_ids
+            top_docs.append(d)
+            # Формируем поля для ответа
+            doc_access_info[f"doc_{i+1}"] = doc_id
+            doc_access_info[f"doc_{i+1}_permission"] = has_permission
+
+    # Формируем контекст из разрешённых и неразрешённых документов (можно включать все, а в тексте AI указывать доступ)
     context = "\n\n".join([d['text'] for d in top_docs])
 
+    # 3️⃣ Сохраняем обращения к документам
     if user_id:
         for d in top_docs:
             doc_id = d['doc_id']
@@ -210,30 +230,26 @@ def request_gpt_openrouter(text, previous_messages=None, description=None, user_
                 db.session.add(dc)
         db.session.commit()
 
-    
+    # 4️⃣ Подготавливаем системное сообщение
     system_prompt = f"Ты - документный помощник, который развернуто и грамотно отвечает на вопросы с использованием информации из предоставленного документа. Твоя задача помогать в рабочих задачах, вот основная информация про меня: {description}"
 
     user_content = f'Контекст из документов: {context}. Вопрос: {text}'
 
     messages = [{"role": "system", "content": system_prompt}]
-    
     if previous_messages:
-        # Фильтруем пустые и неверные форматы
         for m in previous_messages:
             if m.get("content") and isinstance(m.get("content"), str):
                 messages.append({"role": m["role"], "content": m["content"]})
 
     messages.append({"role": "user", "content": user_content})
 
-
-
+    # 5️⃣ Отправка запроса к GPT
     try:
         response = client.chat.completions.create(
             model="qwen/qwen-turbo",
             messages=messages,
             extra_body={"reasoning": {"enabled": True}}
         )
-        
         msg = response.choices[0].message
         if isinstance(msg, dict):
             content = msg.get("content", "")
@@ -242,19 +258,20 @@ def request_gpt_openrouter(text, previous_messages=None, description=None, user_
             content = msg.content
             reasoning_details = {}
 
-        # Возвращаем словарь с контекстом и ответом
+        # Возвращаем ответ с контекстом и информацией о доступности документов
         return {
             "content": content,
             "reasoning_details": reasoning_details,
-            "context": context
+            "context": context,
+            "documents_info": doc_access_info
         }
     except Exception as e:
         return {
             "content": f"Ошибка запроса к AI: {e}",
             "reasoning_details": {},
-            "context": context
+            "context": context,
+            "documents_info": doc_access_info
         }
-
 
 
 """
@@ -460,9 +477,6 @@ def add_message():
     sender = False
     redir = ""
 
-
-
-    
     # Проверяем, что пользователь существует
     user = User.query.get(user_id)
     if not user:
@@ -481,7 +495,6 @@ def add_message():
             return jsonify({'status': False, 'message': 'Chat not found'}), 404
         
     user_description = user.description
-        
     previous_messages = get_last_chat_messages(chat_id, limit=6)
 
     # Обрабатываем аудио-сообщения
@@ -495,13 +508,19 @@ def add_message():
         if not message_text:
             return jsonify({'status': False, 'message': 'Message text is required'}), 400
 
-    # Отправка запроса
-    assistant_msg_obj = request_gpt_openrouter(message_text, previous_messages=previous_messages, description=user_description,user_id=user_id)
+    # Отправка запроса с проверкой доступа к документам
+    assistant_msg_obj = request_gpt_openrouter(
+        text=message_text,
+        previous_messages=previous_messages,
+        description=user_description,
+        user_id=user_id
+    )
 
     # Извлечение данных из словаря
     assistant_msg = assistant_msg_obj.get("content", "")
     reasoning_details = assistant_msg_obj.get("reasoning_details", {})
     rag_context = assistant_msg_obj.get("context", "")
+    documents_info = assistant_msg_obj.get("documents_info", {})  # doc_1, doc_1_permission ...
 
     # Сохраняем сообщение пользователя в БД
     user_message = Message(
@@ -523,11 +542,12 @@ def add_message():
     db.session.add(user_message)
     db.session.add(ai_message)
     db.session.commit()
-    
-    return jsonify({
+
+    # Возвращаем ответ с информацией о документах
+    response_data = {
         'status': True,
         'message': assistant_msg,
-        'rag_context': rag_context,  # возвращаем RAG-контекст
+        'rag_context': rag_context,
         'user_msg_time': user_message.time.strftime('%Y-%m-%d %H:%M:%S'),
         'ai_msg_time': ai_message.time.strftime('%Y-%m-%d %H:%M:%S'),
         'redir': redir,
@@ -536,4 +556,7 @@ def add_message():
         'reasoning_details': reasoning_details,
         'chat_history_context': json.dumps(previous_messages, ensure_ascii=False),
         'description': user_description
-    }), 201
+    }
+    response_data.update(documents_info)  # добавляем doc_1, doc_1_permission, ...
+
+    return jsonify(response_data), 201
