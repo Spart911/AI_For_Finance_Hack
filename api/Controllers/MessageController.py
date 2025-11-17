@@ -6,6 +6,7 @@ from Models.Chat import Chat
 from sqlalchemy import desc
 from datetime import datetime
 from Models.DocCall import DocCall
+from utils.memory_utils import build_memory_snippet, get_user_memory_context, update_user_memory
 import speech_recognition as sr
 import asyncio
 import json
@@ -179,7 +180,13 @@ def query_rag_context(query: str, top_k=5, return_list=False):
         return f"RAG context unavailable: {e}"
 
 
-def request_gpt_openrouter(text, previous_messages=None, description=None, user_id=None):
+def request_gpt_openrouter(
+    text,
+    previous_messages=None,
+    description=None,
+    user_id=None,
+    long_term_memory=None,
+):
     """
     Sends a request to OpenRouter GPT-5.1 with reasoning support.
     previous_messages: list of dicts [{'role': 'user'/'assistant', 'content': str, 'reasoning_details': {...}}]
@@ -231,10 +238,17 @@ def request_gpt_openrouter(text, previous_messages=None, description=None, user_
         db.session.commit()
 
     # 4️⃣ Подготавливаем системное сообщение
-    system_prompt = f"Ты - документный помощник, который развернуто и грамотно отвечает на вопросы с использованием информации из предоставленного документа. Твоя задача помогать в рабочих задачах, вот основная информация про меня: {description}"
+    memory_context = long_term_memory if long_term_memory else "Нет сохранённых заметок о пользователе"
+    system_prompt = (
+        "Ты - документный помощник, который развернуто и грамотно отвечает на вопросы с "
+        "использованием информации из предоставленного документа. Твоя задача помогать в "
+        f"рабочих задачах, вот основная информация про меня: {description}."
+    )
 
-    user_content = f'Контекст из документов: {context}. Вопрос: {text}'
-
+    user_content = (
+        f"Контекст из документов: {context}. Долгосрочная память о пользователе: {memory_context}. "
+        f"Вопрос: {text}"
+    )
     messages = [{"role": "system", "content": system_prompt}]
     if previous_messages:
         for m in previous_messages:
@@ -496,6 +510,7 @@ def add_message():
         
     user_description = user.description
     previous_messages = get_last_chat_messages(chat_id, limit=6)
+    long_term_memory = get_user_memory_context(user_id)
 
     # Обрабатываем аудио-сообщения
     if msg_type == '1':
@@ -513,7 +528,8 @@ def add_message():
         text=message_text,
         previous_messages=previous_messages,
         description=user_description,
-        user_id=user_id
+        user_id=user_id,
+        long_term_memory=long_term_memory
     )
 
     # Извлечение данных из словаря
@@ -542,6 +558,10 @@ def add_message():
     db.session.add(user_message)
     db.session.add(ai_message)
     db.session.commit()
+
+    # Обновляем долговременную память пользователя, чтобы последующие обращения учитывали контекст
+    memory_snippet = build_memory_snippet(message_text, assistant_msg)
+    update_user_memory(user_id, memory_snippet)
 
     # Возвращаем ответ с информацией о документах
     response_data = {
